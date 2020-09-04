@@ -17,7 +17,7 @@ mod tests {
     use torch_sys::dummy_cuda_dependency;
 
     use sbert::Tokenizer as TraitTokenizer;
-    use sbert::{HFTokenizer, SBertHF, SBertRT, SafeSBertHF, SafeSBertRT};
+    use sbert::{HFTokenizer, SBertHF, SBertRT};
 
     use rand::random;
     fn rand_string() -> String {
@@ -26,11 +26,13 @@ mod tests {
             .collect()
     }
 
+    const BATCH_SIZE: usize = 64;
+
     #[test]
     fn test_hf_pre_tokenizer() {
         unsafe {
             dummy_cuda_dependency();
-        } //Windows Hack
+        } // Windows Hack
 
         let mut home: PathBuf = env::current_dir().unwrap();
         home.push("models");
@@ -49,7 +51,9 @@ mod tests {
         println!("Tokens {:?}", tokens[0]);
 
         let sbert_model = SBertHF::new(model_path).unwrap();
-        let output = sbert_model.encode_with_attention(&texts, 64).unwrap();
+        let output = sbert_model
+            .encode_with_attention(&texts, BATCH_SIZE)
+            .unwrap();
 
         println!("att {:?}", output.1[0][0]);
         assert_eq!(
@@ -65,7 +69,7 @@ mod tests {
     fn test_safe_sbert_rust_tokenizers() {
         unsafe {
             dummy_cuda_dependency();
-        } //Windows Hack
+        } // Windows Hack
 
         let mut home: PathBuf = env::current_dir().unwrap();
         home.push("models");
@@ -73,7 +77,7 @@ mod tests {
 
         println!("Loading sbert ...");
         let before = Instant::now();
-        let sbert_model = SafeSBertRT::new(home).unwrap();
+        let sbert_model = SBertRT::new(home).unwrap();
         println!("Elapsed time: {:.2?}", before.elapsed());
 
         let mut texts = Vec::new();
@@ -85,9 +89,9 @@ mod tests {
         println!("Encoding {} sentences...", texts.len());
         let before = Instant::now();
         for _ in 0..9 {
-            &sbert_model.par_encode(&texts, 64).unwrap();
+            &sbert_model.encode(&texts, BATCH_SIZE).unwrap();
         }
-        let output = &sbert_model.par_encode(&texts, 64).unwrap()[0][..5];
+        let output = &sbert_model.encode(&texts, BATCH_SIZE).unwrap()[0][..5];
         println!("Elapsed time: {:?}ms", before.elapsed().as_millis() / 10);
         println!("Vec: {:?}", output);
 
@@ -102,14 +106,14 @@ mod tests {
     fn test_safe_sbert_hugging_face_tokenizers() {
         unsafe {
             dummy_cuda_dependency();
-        } //Windows Hack
+        } // Windows Hack
         let mut home: PathBuf = env::current_dir().unwrap();
         home.push("models");
         home.push("distiluse-base-multilingual-cased");
 
         println!("Loading sbert ...");
         let before = Instant::now();
-        let sbert_model = SafeSBertHF::new(home).unwrap();
+        let sbert_model = SBertHF::new(home).unwrap();
         println!("Elapsed time: {:.2?}", before.elapsed());
 
         let mut texts = Vec::new();
@@ -121,9 +125,9 @@ mod tests {
         println!("Encoding {} sentences...", texts.len());
         let before = Instant::now();
         for _ in 0..9 {
-            &sbert_model.par_encode(&texts, 64).unwrap()[0][..5];
+            &sbert_model.encode(&texts, BATCH_SIZE).unwrap()[0][..5];
         }
-        let output = &sbert_model.par_encode(&texts, 64).unwrap()[0][..5];
+        let output = &sbert_model.encode(&texts, BATCH_SIZE).unwrap()[0][..5];
         println!("Elapsed time: {:?}ms", before.elapsed().as_millis() / 10);
         println!("Vec: {:?}", output);
 
@@ -154,9 +158,9 @@ mod tests {
         println!("Encoding {} sentences...", texts.len());
         let before = Instant::now();
         for _ in 0..9 {
-            &sbert_model.encode(&texts, 64).unwrap()[0][..5];
+            &sbert_model.encode(&texts, BATCH_SIZE).unwrap()[0][..5];
         }
-        let output = &sbert_model.encode(&texts, 64).unwrap()[0][..5];
+        let output = &sbert_model.encode(&texts, BATCH_SIZE).unwrap()[0][..5];
         println!("Elapsed time: {:?}ms", before.elapsed().as_millis() / 10);
         println!("Vec: {:?}", output);
 
@@ -187,9 +191,9 @@ mod tests {
         println!("Encoding {} sentences...", texts.len());
         let before = Instant::now();
         for _ in 0..9 {
-            &sbert_model.encode(&texts, 64).unwrap()[0][..5];
+            &sbert_model.encode(&texts, BATCH_SIZE).unwrap()[0][..5];
         }
-        let output = &sbert_model.encode(&texts, 64).unwrap()[0][..5];
+        let output = &sbert_model.encode(&texts, BATCH_SIZE).unwrap()[0][..5];
         println!("Elapsed time: {:?}ms", before.elapsed().as_millis() / 10);
         println!("Vec: {:?}", output);
 
@@ -216,12 +220,14 @@ mod tests {
         texts.push(String::from("testtest"));
 
         println!("Encoding {} sentence with attention...", texts.len());
-        let output = &sbert_model.encode_with_attention(&texts, 64).unwrap();
+        let output = &sbert_model
+            .encode_with_attention(&texts, BATCH_SIZE)
+            .unwrap();
         let emb = &output.0[0][..5];
         let attention = &output.1;
 
         println!("texts: {:?}", texts.clone());
-        let tokens = sbert_model.tokenizer.pre_tokenize(&texts);
+        let tokens = sbert_model.tokenizer().pre_tokenize(&texts);
 
         let len = tokens[0].len();
         let head_nb = attention[0][0].len();
@@ -309,7 +315,8 @@ mod tests {
         let vocab_file = model_dir.join("vocab.txt");
 
         // Set-up DistilBert model and tokenizer
-        let tokenizer = BertTokenizer::from_file(&vocab_file.to_string_lossy(), false);
+        let tokenizer =
+            BertTokenizer::from_file(&vocab_file.to_string_lossy(), false, false).unwrap();
 
         let input = vec!["TTThis player needs tp be reported lolz."; 1000];
         let input_1 = input.clone();
