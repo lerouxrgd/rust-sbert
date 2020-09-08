@@ -95,7 +95,7 @@ where
 
         let input_len = sorted_pad_input.len();
         let tokenizer = self.tokenizer.clone();
-        let device = self.device.clone();
+        // let device = self.device.clone();
 
         let (tx_tok, rx_tok) = chan::unbounded();
         let (tx_embed, rx_embed) = chan::unbounded();
@@ -116,22 +116,29 @@ where
 
                     let (tokenized_input, attention) = tokenizer.tokenize(&sorted_pad_input[range]);
 
-                    let batch_tensor = Tensor::stack(&tokenized_input, 0).to(device);
-                    let batch_attention = Tensor::stack(&attention, 0).to(device);
+                    let tokens = Tensor::stack(&tokenized_input, 0);
+                    let batch_tensor = tokens.to4(self.device, tokens.kind(), true, false);
+
+                    let attention = Tensor::stack(&attention, 0);
+                    let batch_attention = attention.to4(self.device, attention.kind(), true, false);
+
                     tx_tok.send((batch_tensor, batch_attention)).unwrap()
                 }
             });
 
             s.spawn(move |_| {
                 for (batch_tensor, batch_attention) in rx_tok.iter() {
-                    let batch_attention_c = batch_attention.shallow_clone();
-
                     let (embeddings, _, _attention) = self
-                        .forward_t(Some(batch_tensor), Some(batch_attention))
+                        .forward_t(
+                            Some(batch_tensor.shallow_clone()),
+                            Some(batch_attention.shallow_clone()),
+                        )
                         .map_err(Error::Encoding)
                         .unwrap();
 
-                    let mean_pool = self.pooling.forward(&embeddings, &batch_attention_c);
+                    let mean_pool = self
+                        .pooling
+                        .forward(&embeddings, &batch_attention.shallow_clone());
                     let linear_tanh = self.dense.forward(&mean_pool);
 
                     tx_embed.send(linear_tanh).unwrap()
@@ -140,8 +147,10 @@ where
 
             s.spawn(move |_| {
                 let mut batch_tensors = Vec::<Embeddings>::with_capacity(input_len);
-                for embeddings in rx_embed.iter() {
-                    batch_tensors.extend(Vec::<Embeddings>::from(embeddings));
+                for emb in rx_embed.iter() {
+                    let emb = emb.shallow_clone();
+                    let embeddings_cpu = emb.to4(self.device, emb.kind(), true, false);
+                    batch_tensors.extend(Vec::<Embeddings>::from(embeddings_cpu));
                 }
                 tx_res.send(batch_tensors).unwrap()
             });
