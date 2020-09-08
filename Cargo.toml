@@ -15,8 +15,10 @@ include = [
 ]
 
 [dependencies]
+crossbeam-channel = "0.4"
 lazy_static = "1.4"
 log = "0.4"
+num_cpus = "1.13"
 prost = "0.6"
 rayon = "1.4"
 rust-bert = "0.8"

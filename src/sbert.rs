@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crossbeam_channel as chan;
 use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use rust_bert::distilbert::{DistilBertConfig, DistilBertModel};
 use rust_bert::Config;
 use tch::{nn, Device, Tensor};
@@ -18,7 +20,11 @@ pub struct SBert<T> {
     dense: Dense,
     tokenizer: Arc<T>,
     device: Device,
+    thread_pool: ThreadPool,
 }
+
+unsafe impl<T: Tokenizer + Send + Sync> Sync for SBert<T> {}
+unsafe impl<T: Tokenizer + Send + Sync> Send for SBert<T> {}
 
 impl<T> SBert<T>
 where
@@ -54,6 +60,11 @@ where
 
         vs.load(weights_file)?;
 
+        let thread_pool = ThreadPoolBuilder::new()
+            .num_threads(num_cpus::get())
+            .build()
+            .unwrap();
+
         Ok(SBert {
             lm_model,
             nb_layers,
@@ -62,6 +73,7 @@ where
             dense,
             tokenizer,
             device,
+            thread_pool,
         })
     }
 
@@ -85,45 +97,57 @@ where
         let tokenizer = self.tokenizer.clone();
         let device = self.device.clone();
 
-        let tokenized_batches = (0..input_len)
-            .into_par_iter()
-            .step_by(batch_size)
-            .map(|batch_i| {
-                let max_range = std::cmp::min(batch_i + batch_size, input_len);
-                let range = batch_i..max_range;
+        let (tx_tok, rx_tok) = chan::unbounded();
+        let (tx_embed, rx_embed) = chan::unbounded();
+        let (tx_res, rx_res) = chan::bounded(1);
 
-                log::info!(
-                    "Batch {}/{}, size {}",
-                    (batch_i as f64 / batch_size as f64).ceil() as usize + 1,
-                    (input_len as f64 / batch_size as f64).ceil() as usize,
-                    max_range - batch_i
-                );
+        self.thread_pool.scope(move |s| {
+            s.spawn(move |_| {
+                for batch_i in (0..input_len).step_by(batch_size) {
+                    let max_range = std::cmp::min(batch_i + batch_size, input_len);
+                    let range = batch_i..max_range;
 
-                let (tokenized_input, attention) = tokenizer.tokenize(&sorted_pad_input[range]);
+                    log::info!(
+                        "Batch {}/{}, size {}",
+                        (batch_i as f64 / batch_size as f64).ceil() as usize + 1,
+                        (input_len as f64 / batch_size as f64).ceil() as usize,
+                        max_range - batch_i
+                    );
 
-                let batch_tensor = Tensor::stack(&tokenized_input, 0).to(device);
-                let batch_attention = Tensor::stack(&attention, 0).to(device);
+                    let (tokenized_input, attention) = tokenizer.tokenize(&sorted_pad_input[range]);
 
-                (batch_tensor, batch_attention)
-            })
-            .collect::<Vec<(Tensor, Tensor)>>();
+                    let batch_tensor = Tensor::stack(&tokenized_input, 0).to(device);
+                    let batch_attention = Tensor::stack(&attention, 0).to(device);
+                    tx_tok.send((batch_tensor, batch_attention)).unwrap()
+                }
+            });
 
-        let mut batch_tensors = Vec::<Embeddings>::with_capacity(input_len);
+            s.spawn(move |_| {
+                for (batch_tensor, batch_attention) in rx_tok.iter() {
+                    let batch_attention_c = batch_attention.shallow_clone();
 
-        for (batch_tensor, batch_attention) in tokenized_batches.into_iter() {
-            let batch_attention_c = batch_attention.shallow_clone();
+                    let (embeddings, _, _attention) = self
+                        .forward_t(Some(batch_tensor), Some(batch_attention))
+                        .map_err(Error::Encoding)
+                        .unwrap();
 
-            let (embeddings, _, _attention) = self
-                .forward_t(Some(batch_tensor), Some(batch_attention))
-                .map_err(Error::Encoding)?;
+                    let mean_pool = self.pooling.forward(&embeddings, &batch_attention_c);
+                    let linear_tanh = self.dense.forward(&mean_pool);
 
-            let mean_pool = self.pooling.forward(&embeddings, &batch_attention_c);
-            let linear_tanh = self.dense.forward(&mean_pool);
+                    tx_embed.send(linear_tanh).unwrap()
+                }
+            });
 
-            batch_tensors.extend(Vec::<Embeddings>::from(linear_tanh));
-        }
+            s.spawn(move |_| {
+                let mut batch_tensors = Vec::<Embeddings>::with_capacity(input_len);
+                for embeddings in rx_embed.iter() {
+                    batch_tensors.extend(Vec::<Embeddings>::from(embeddings));
+                }
+                tx_res.send(batch_tensors).unwrap()
+            });
+        });
 
-        Ok(batch_tensors)
+        Ok(rx_res.recv().unwrap())
     }
 
     pub fn encode_with_attention<S, B>(
@@ -231,7 +255,7 @@ where
 }
 
 fn pad_sort<O: Ord>(arr: &[O]) -> Vec<usize> {
-    let mut idx = vec![0; arr.len()];
+    let mut idx = (0..arr.len()).collect::<Vec<_>>();
     idx.sort_unstable_by(|&i, &j| arr[i].cmp(&arr[j]));
     idx
 }
